@@ -6,6 +6,7 @@
 
 #include <unistd.h>
 #include <termios.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -25,6 +26,7 @@
 /*** data ***/
 
 enum editorKey {
+  BACKSPACE = 127,
   ARROW_LEFT = 1000,
   ARROW_RIGHT,
   ARROW_UP,
@@ -57,6 +59,10 @@ struct editorConfig {
   time_t statusmsg_time;
 	struct termios orig_termios;
 };
+
+/*** prototype ***/
+
+void editorSetStatusMessage(const char *fmt, ...);
 
 struct editorConfig E;
 
@@ -217,7 +223,43 @@ void editorAppendRow(char *s, size_t len) {
   E.numrows++;
 }
 
+void editorRowInsertChar(erow *row, int at, int c) {
+  if (at < 0 || at > row->size) at = row->size;
+  row->chars = realloc(row->chars, row->size + 2);
+  memmove(&row->chars[at + 1], &row->chars[at], row->size - at + 1);
+  row->size++;
+  row->chars[at] = c;
+  editorUpdateRow(row);
+}
+
+/*** editor operations ***/
+
+void editorInsertChar(int c) {
+  if (E.cy == E.numrows) {
+    editorAppendRow("", 0);
+  }
+  editorRowInsertChar(&E.row[E.cy], E.cx, c);
+  E.cx++;
+}
+
 /*** file i/o ***/
+
+char *editorRowsToString(int *buflen) {
+  int totlen = 0;
+  int j;
+  for (j = 0; j < E.numrows; j++)
+    totlen += E.row[j].size + 1;
+  *buflen = totlen;
+  char *buf = malloc(totlen);
+  char *p = buf;
+  for (j = 0; j < E.numrows; j++) {
+    memcpy(p, E.row[j].chars, E.row[j].size);
+    p += E.row[j].size;
+    *p = '\n';
+    p++;
+  }
+  return buf;
+}
 
 void editorOpen(char *filename) {
   free(E.filename);
@@ -236,6 +278,26 @@ void editorOpen(char *filename) {
   }
   free(line);
   fclose(fp);
+}
+
+void editorSave() {
+  if (E.filename == NULL) return;
+  int len;
+  char *buf = editorRowsToString(&len);
+  int fd = open(E.filename, O_RDWR | O_CREAT, 0644);
+  if (fd != -1) {
+    if (ftruncate(fd, len) != -1) {
+      if (write(fd, buf, len) == len) {
+        close(fd);
+        free(buf);
+        editorSetStatusMessage("%d bytes written to disk", len);
+        return;
+      }
+    }
+    close(fd);
+  }
+  free(buf);
+  editorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
 }
 
 /*** append buffer ***/
@@ -416,11 +478,19 @@ void editorProcessKeypress() {
 	int c = editorReadKey();
 
 	switch(c) {
+    case '\r':
+      /* TODO */
+      break;
+
 		case CTRL_KEY('q'):
 			write(STDOUT_FILENO, "\x1b[2J", 4);
 			write(STDOUT_FILENO, "\x1b[H", 3);
 			exit(0);
 			break;
+    
+    case CTRL_KEY('s'):
+      editorSave();
+      break;
 
 		case HOME_KEY:
       E.cx = 0;
@@ -430,7 +500,13 @@ void editorProcessKeypress() {
         E.cx = E.row[E.cy].size;
       break;
 
+    case BACKSPACE:
+    case CTRL_KEY('h'):
+    case DEL_KEY:
+      /* TODO */
+      break;
 
+    
 		case PAGE_UP:
     case PAGE_DOWN:
       {
@@ -445,6 +521,14 @@ void editorProcessKeypress() {
     case ARROW_LEFT:
     case ARROW_RIGHT:
       editorMoveCursor(c);
+      break;
+
+    case CTRL_KEY('l'):
+    case '\x1b':
+      break;
+    
+    default:
+      editorInsertChar(c);
       break;
 	}
 }
@@ -473,6 +557,8 @@ int main(int argc, char *argv[]){
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
+
+  editorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
 
 	while (1){
 		editorRefreshScreen();
